@@ -13,6 +13,27 @@
 * ⚡ **一键全开/紧急恢复**：提供一键放通所有端口模式。
 
 ---
+## 💻 系统兼容性 (OS Compatibility)
+
+本脚本内置双引擎检测，广泛兼容过去十年至今绝大多数主流 Linux 服务器操作系统：
+
+### 1. Debian / Ubuntu 体系
+* **Ubuntu**: 16.04, 18.04, 20.04, 22.04, 24.04 及更新版本（在 22.04+ 会自动启用 `nftables` 模式）。
+* **Debian**: Debian 9, 10, 11, 12 及后续版本（自 Debian 10 起无缝适配其默认的 `nftables` 后端）。
+
+### 2. Red Hat / CentOS 体系
+* **CentOS**: 7.x 系列（运行于 `iptables` 模式）；CentOS Stream 8 / 9（运行于 `nftables` 模式）。
+* **Rocky Linux / AlmaLinux**: 8.x, 9.x 全系列核心。
+* **RHEL (Red Hat Enterprise Linux)**: 7, 8, 9 版本。
+
+### 3. 其他常见环境
+* **Amazon Linux**: Amazon Linux 2 / 2023（AWS 云环境完美兼容）。
+* **Alpine Linux**: 兼容（需确保系统内已预装 `bash`、`iproute2` 组件）。
+
+### ⚠️ 不兼容或受限环境
+* **OpenWrt / 软路由**: 不建议使用。精简版系统缺少标准工具链，且其拥有自主的防火墙管理架构（如 fw4）。
+* **Docker / 容器内部**: 默认不支持在容器内直接运行（会因缺少内核网络修改权限而报错），脚本必须部署在**宿主机**上。
+---
 
 ## 🛠️ 一键远程运行命令
 
