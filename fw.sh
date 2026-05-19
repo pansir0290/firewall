@@ -3,9 +3,10 @@
 # ====================================================================
 # 脚本名称: 智能防火墙交互管理工具 (兼容 iptables/nftables)
 # 功能描述: 严格白名单机制，支持端口范围、多协议选择、自动探测及一键放通
+# 升级功能: 支持一键安全修改 SSH 端口并自动关闭 22 端口
 # ====================================================================
 
-# 4. 自动加权：尝试给脚本自身赋予最高执行权限
+# 自动加权：尝试给脚本自身赋予最高执行权限
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || echo "$0")
 if [ -f "$SCRIPT_PATH" ] && [ ! -x "$SCRIPT_PATH" ]; then
     chmod +x "$SCRIPT_PATH" 2>/dev/null
@@ -28,10 +29,10 @@ detect_firewall() {
     else
         echo "提示：未检测到防火墙组件，正在尝试自动安装 iptables..."
         if command -v apt &> /dev/null; then
-            apt update && apt install -y iptables iproute2
+            apt update && apt install -y iptables iproute2 openssh-server
             FIREWALL_MODE="iptables"
         elif command -v yum &> /dev/null; then
-            yum install -y iptables iproute2
+            yum install -y iptables iproute2 openssh-server
             FIREWALL_MODE="iptables"
         else
             echo "错误：无法自动安装，请手动安装 iptables 或 nftables 后再运行！"
@@ -40,7 +41,7 @@ detect_firewall() {
     fi
 }
 
-# 5. 自动探测本机已占用的端口并自动放通
+# 自动探测本机已占用的端口并自动放通
 auto_allow_current_ports() {
     echo "正在自动探测检测本机已占用的服务端口..."
     if ! command -v ss &> /dev/null; then
@@ -48,7 +49,6 @@ auto_allow_current_ports() {
         return
     fi
 
-    # 提取当前处于 LISTEN 状态的 TCP 和 UDP 端口
     local ports=$(ss -tuln | awk 'NR>1 {print $5}' | awk -F: '{print $nf}' | sort -nu)
     
     if [ -z "$ports" ]; then
@@ -60,7 +60,6 @@ auto_allow_current_ports() {
     for port in $ports; do
         if [[ "$port" =~ ^[0-9]+$ ]]; then
             if [ "$FIREWALL_MODE" = "nftables" ]; then
-                # nftables 允许 tcp/udp 复合规则
                 nft add rule inet filter input tcp dport $port accept 2>/dev/null
                 nft add rule inet filter input udp dport $port accept 2>/dev/null
             else
@@ -94,30 +93,22 @@ init_firewall() {
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     fi
 
-    # 初始化时触发自动探测放通，防止断连
     auto_allow_current_ports
-    
     echo "防火墙严格模式初始化完成！"
     save_rules
     show_rules
 }
 
-# 3. 一键放通所有端口
+# 一键放通所有端口
 allow_all_ports() {
     echo "正在切换至【一键放通所有端口】模式..."
     if [ "$FIREWALL_MODE" = "nftables" ]; then
         nft flush ruleset
         nft add table inet filter
         nft add chain inet filter input { type filter hook input priority 0 \; policy accept \; }
-        nft add chain inet filter forward { type filter hook forward priority 0 \; policy accept \; }
-        nft add chain inet filter output { type filter hook output priority 0 \; policy accept \; }
     else
-        iptables -F
-        iptables -X
-        iptables -Z
+        iptables -F && iptables -X && iptables -Z
         iptables -P INPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -P OUTPUT ACCEPT
     fi
     echo "警告：当前已放通所有入站流量！系统处于全开放状态。"
     save_rules
@@ -128,7 +119,6 @@ show_rules() {
     echo -e "\n================ 当前入站放行规则列表 ================"
     if [ "$FIREWALL_MODE" = "nftables" ]; then
         if nft list tables | grep -q "inet filter"; then
-            # 打印当前默认策略
             local policy=$(nft list chain inet filter input | grep "policy")
             echo "当前默认策略: $policy"
             echo "----------------------------------------------------"
@@ -144,62 +134,48 @@ show_rules() {
     echo "===================================================="
 }
 
-# 1 & 2. 放行端口（支持范围、支持协议自由选择）
+# 放行端口
 allow_port() {
     echo -e "\n请输入要放行的端口或端口范围："
     echo "  - 单个端口示例: 80"
     echo "  - 端口范围示例: 8000-9000"
     read -p "请输入: " port_input
 
-    # 验证输入格式 (数字 或 数字-数字)
     if ! [[ "$port_input" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
-        echo "输入错误：请输入有效的端口或端口范围(如: 80 或 8000-9000)！"
+        echo "输入错误：请输入有效的端口或端口范围！"
         return
     fi
 
-    # 协议选择
     echo "请选择要放行的协议类型："
     echo "1) TCP"
     echo "2) UDP"
-    echo "3) ALL (同时放行 TCP 和 UDP)"
+    echo "3) ALL"
     read -p "请选择 [1-3, 默认 1]: " proto_choice
     
-    local proto=""
-    case $proto_choice in
-        2) proto="udp" ;;
-        3) proto="all" ;;
-        *) proto="tcp" ;;
-    esac
+    local proto="tcp"
+    [ "$proto_choice" = "2" ] && proto="udp"
+    [ "$proto_choice" = "3" ] && proto="all"
 
-    # 转换端口范围符号 (nftables 使用 8000-9000, iptables 使用 8000:9000)
     local nft_port="$port_input"
     local ipt_port="${port_input//-/:}"
 
     if [ "$FIREWALL_MODE" = "nftables" ]; then
-        # 检查 inet filter 是否存在，不存在先初始化
-        if ! nft list tables | grep -q "inet filter"; then
-            echo "正在为您建立基础防火墙表结构..."
-            init_firewall
-        fi
-
+        if ! nft list tables | grep -q "inet filter"; then init_firewall; fi
         if [ "$proto" = "all" ]; then
             nft add rule inet filter input tcp dport $nft_port accept
             nft add rule inet filter input udp dport $nft_port accept
-            echo "成功：已放行端口 $port_input (TCP & UDP)。"
         else
             nft add rule inet filter input $proto dport $nft_port accept
-            echo "成功：已放行端口 $port_input ($proto)。"
         fi
     else
         if [ "$proto" = "all" ]; then
             iptables -A INPUT -p tcp --dport $ipt_port -j ACCEPT
             iptables -A INPUT -p udp --dport $ipt_port -j ACCEPT
-            echo "成功：已放行端口 $port_input (TCP & UDP)。"
         else
             iptables -A INPUT -p $proto --dport $ipt_port -j ACCEPT
-            echo "成功：已放行端口 $port_input ($proto)。"
         fi
     fi
+    echo "成功：已放行端口 $port_input ($proto)。"
     save_rules
 }
 
@@ -207,7 +183,7 @@ allow_port() {
 block_port() {
     show_rules
     if [ "$FIREWALL_MODE" = "nftables" ]; then
-        read -p "请输入你要删除规则的 handle 编号 (每行最右侧的数字): " handle_num
+        read -p "请输入你要删除规则的 handle 编号: " handle_num
         if ! [[ "$handle_num" =~ ^[0-9]+$ ]]; then echo "输入错误！"; return; fi
         nft delete rule inet filter input handle $handle_num 2>/dev/null
     else
@@ -220,6 +196,82 @@ block_port() {
         echo "成功：该防火墙规则已移除。"
         save_rules
     fi
+}
+
+# 安全修改 SSH 端口并自动关闭 22 端口
+change_ssh_port() {
+    echo -e "\n=== 安全安全更改 SSH 端口向导 ==="
+    read -p "请输入你想使用的新 SSH 端口号 (推荐 1024-65535 之间): " new_port
+    
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -le 0 ] || [ "$new_port" -gt 65535 ]; then
+        echo "错误：请输入 1 到 65535 之间的有效数字！"
+        return
+    fi
+
+    if [ "$new_port" -eq 22 ]; then
+        echo "提示：你输入的就是默认的 22 端口，无需修改。"
+        return
+    fi
+
+    # 1. 先在防火墙中紧急放行新端口（防止修改后立刻断开）
+    echo "第一步：正在防火墙中提前放行新端口 $new_port..."
+    if [ "$FIREWALL_MODE" = "nftables" ]; then
+        if ! nft list tables | grep -q "inet filter"; then init_firewall; fi
+        nft add rule inet filter input tcp dport $new_port accept 2>/dev/null
+    else
+        iptables -A INPUT -p tcp --dport $new_port -j ACCEPT 2>/dev/null
+    fi
+
+    # 2. 修改 SSH 配置文件 (/etc/ssh/sshd_config)
+    echo "第二步：正在修改系统 SSH 配置文件..."
+    if [ ! -f "/etc/ssh/sshd_config" ]; then
+        echo "错误：未找到 /etc/ssh/sshd_config 配置文件，修改终止！"
+        return
+    fi
+
+    # 备份原配置
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    
+    # 移除原本可能存在的 Port 行，并写入新 Port
+    sed -i '/^Port /d' /etc/ssh/sshd_config
+    sed -i '/^#Port 22/d' /etc/ssh/sshd_config
+    echo "Port $new_port" >> /etc/ssh/sshd_config
+
+    # 3. 重启 SSH 服务
+    echo "第三步：正在重启系统 SSH 服务使新端口生效..."
+    if command -v systemctl &> /dev/null; then
+        systemctl restart sshd || systemctl restart ssh
+    else
+        service sshd restart || service ssh restart
+    fi
+
+    sleep 2
+    echo "新端口 $new_port 的 SSH 服务已成功拉起！"
+
+    # 4. 自动在防火墙中关闭旧的 22 端口
+    echo "第四步：正在防火墙中自动剔除/封锁旧的 22 端口..."
+    if [ "$FIREWALL_MODE" = "nftables" ]; then
+        # 寻找包含 22 accept 的规则并删除
+        local handles=$(nft -a list chain inet filter input | grep "tcp dport 22" | awk -F'handle ' '{print $2}')
+        for h in $handles; do
+            nft delete rule inet filter input handle $h 2>/dev/null
+        done
+    else
+        # 循环删除 iptables 中的 22 端口规则
+        while iptables -L INPUT -n --line-numbers | grep -q "dpt:22"; do
+            local num=$(iptables -L INPUT -n --line-numbers | grep "dpt:22" | head -n 1 | awk '{print $1}')
+            iptables -D INPUT $num 2>/dev/null
+        done
+    fi
+
+    save_rules
+    echo -e "\n🎉 【大功告成！】"
+    echo "=========================================================="
+    echo "1. 你的新 SSH 端口现在是: $new_port"
+    echo "2. 防火墙已自动关闭 22 端口。"
+    echo "⚠️  重要提示：请【不要断开当前的终端】，立即新开一个 Windows"
+    echo "   终端连接 `你的IP:$new_port` 测试是否能成功连上！验证无误后再关闭本窗口。"
+    echo "=========================================================="
 }
 
 # 持久化规则
@@ -240,12 +292,11 @@ save_rules() {
     fi
 }
 
-# 执行初始化环境检测
+# 执行环境检测
 detect_firewall
 
-# 首次运行或表不存在时，主动探测当前端口提示
+# 首次运行提示
 if [ "$FIREWALL_MODE" = "nftables" ] && ! nft list tables | grep -q "inet filter"; then
-    echo -e "\n[提示] 检测到这是脚本在当前系统首次运行。"
     auto_allow_current_ports
 fi
 
@@ -256,20 +307,22 @@ while true; do
     echo "2. 查看当前放行规则"
     echo "3. 手动放行端口/端口范围 (支持 TCP/UDP/ALL)"
     echo "4. 封锁/删除指定规则"
-    echo "5. 一键放通所有端口 (切换为全开模式)"
-    echo "6. 手动保存当前规则"
-    echo "7. 退出脚本"
+    echo "5. 一键一键安全修改 SSH 端口 (修改后自动关闭22端口)"
+    echo "6. 一键放通所有端口 (切换为全开模式)"
+    echo "7. 手动保存当前规则"
+    echo "8. 退出脚本"
     echo "=================================================="
-    read -p "请选择操作 [1-7]: " choice
+    read -p "请选择操作 [1-8]: " choice
 
     case $choice in
         1) init_firewall ;;
         2) show_rules ;;
         3) allow_port ;;
         4) block_port ;;
-        5) allow_all_ports ;;
-        6) save_rules ;;
-        7) echo "感谢使用，脚本已安全退出。"; exit 0 ;;
+        5) change_ssh_port ;;
+        6) allow_all_ports ;;
+        7) save_rules ;;
+        8) echo "感谢使用，脚本已安全退出。"; exit 0 ;;
         *) echo "无效选项，请重新选择！" ;;
     esac
 done
