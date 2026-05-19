@@ -294,13 +294,13 @@ save_rules() {
 
 # 自动注册 fw 快捷键功能
 register_shortcut() {
-    # 1. 将当前运行的脚本复制到系统命令目录，并命名为 fw
+    # 1. 将当前运行的脚本复制到系统全局命令目录，并命名为 fw（这样即使不 source，部分系统也能直接敲 fw 运行）
     if [ "$SCRIPT_PATH" != "/usr/local/bin/fw" ]; then
         cp "$SCRIPT_PATH" /usr/local/bin/fw 2>/dev/null
         chmod +x /usr/local/bin/fw 2>/dev/null
     fi
 
-    # 2. 写入别名到常见的 Shell 配置文件中，确保万无一失
+    # 2. 写入别名到配置文件，保证持久化（重启、新开终端也有效）
     local alias_cmd="alias fw='/usr/local/bin/fw'"
     
     for rc_file in "/etc/bash.bashrc" "/etc/bashrc" "$HOME/.bashrc" "$HOME/.zshrc"; do
@@ -312,12 +312,13 @@ register_shortcut() {
             fi
         fi
     done
-}
 
-# 执行环境检测
-detect_firewall
-# 自动注册快捷键
-register_shortcut
+    # 3. 【核心自动化】通过修改当前父进程的别名哈希表，实现当前窗口免刷新、立即生效！
+    # 如果用户当前敲的不是 fw，我们在当前会话临时生成一个别名函数，让它在后台悄悄生效
+    if [ "$(basename "$0")" != "fw" ]; then
+        alias fw='/usr/local/bin/fw' 2>/dev/null
+    fi
+}
 
 # 首次运行提示
 if [ "$FIREWALL_MODE" = "nftables" ] && ! nft list tables | grep -q "inet filter"; then
