@@ -292,8 +292,32 @@ save_rules() {
     fi
 }
 
+# 自动注册 fw 快捷键功能
+register_shortcut() {
+    # 1. 将当前运行的脚本复制到系统命令目录，并命名为 fw
+    if [ "$SCRIPT_PATH" != "/usr/local/bin/fw" ]; then
+        cp "$SCRIPT_PATH" /usr/local/bin/fw 2>/dev/null
+        chmod +x /usr/local/bin/fw 2>/dev/null
+    fi
+
+    # 2. 写入别名到常见的 Shell 配置文件中，确保万无一失
+    local alias_cmd="alias fw='/usr/local/bin/fw'"
+    
+    for rc_file in "/etc/bash.bashrc" "/etc/bashrc" "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [ -f "$rc_file" ]; then
+            if ! grep -q "alias fw=" "$rc_file"; then
+                echo "" >> "$rc_file"
+                echo "# 智能防火墙快捷键" >> "$rc_file"
+                echo "$alias_cmd" >> "$rc_file"
+            fi
+        fi
+    done
+}
+
 # 执行环境检测
 detect_firewall
+# 自动注册快捷键
+register_shortcut
 
 # 首次运行提示
 if [ "$FIREWALL_MODE" = "nftables" ] && ! nft list tables | grep -q "inet filter"; then
