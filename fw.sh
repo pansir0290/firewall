@@ -3,7 +3,7 @@
 # ====================================================================
 # 脚本名称: 智能防火墙交互管理工具 (兼容 iptables/nftables)
 # 功能描述: 严格白名单机制，支持端口范围、多协议选择、自动探测及一键放通
-# 升级功能: 支持一键安全修改 SSH 端口并自动关闭 22 端口
+# 升级功能: 支持一键安全修改 SSH 端口，并自动生成免刷新全局 fw 命令
 # ====================================================================
 
 # 自动加权：尝试给脚本自身赋予最高执行权限
@@ -39,6 +39,28 @@ detect_firewall() {
             exit 1
         fi
     fi
+}
+
+# 自动注册 fw 快捷键功能
+register_shortcut() {
+    # 1. 将当前运行的脚本复制到系统全局命令目录，并命名为 fw
+    if [ "$SCRIPT_PATH" != "/usr/local/bin/fw" ]; then
+        cp "$SCRIPT_PATH" /usr/local/bin/fw 2>/dev/null
+        chmod +x /usr/local/bin/fw 2>/dev/null
+    fi
+
+    # 2. 写入别名到配置文件，保证持久化（重启、新开终端也有效）
+    local alias_cmd="alias fw='/usr/local/bin/fw'"
+    
+    for rc_file in "/etc/bash.bashrc" "/etc/bashrc" "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if [ -f "$rc_file" ]; then
+            if ! grep -q "alias fw=" "$rc_file"; then
+                echo "" >> "$rc_file"
+                echo "# 智能防火墙快捷键" >> "$rc_file"
+                echo "$alias_cmd" >> "$rc_file"
+            fi
+        fi
+    done
 }
 
 # 自动探测本机已占用的端口并自动放通
@@ -200,7 +222,7 @@ block_port() {
 
 # 安全修改 SSH 端口并自动关闭 22 端口
 change_ssh_port() {
-    echo -e "\n=== 安全安全更改 SSH 端口向导 ==="
+    echo -e "\n=== 安全更改 SSH 端口向导 ==="
     read -p "请输入你想使用的新 SSH 端口号 (推荐 1024-65535 之间): " new_port
     
     if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -le 0 ] || [ "$new_port" -gt 65535 ]; then
@@ -213,7 +235,7 @@ change_ssh_port() {
         return
     fi
 
-    # 1. 先在防火墙中紧急放行新端口（防止修改后立刻断开）
+    # 1. 先在防火墙中紧急放行新端口
     echo "第一步：正在防火墙中提前放行新端口 $new_port..."
     if [ "$FIREWALL_MODE" = "nftables" ]; then
         if ! nft list tables | grep -q "inet filter"; then init_firewall; fi
@@ -222,17 +244,14 @@ change_ssh_port() {
         iptables -A INPUT -p tcp --dport $new_port -j ACCEPT 2>/dev/null
     fi
 
-    # 2. 修改 SSH 配置文件 (/etc/ssh/sshd_config)
+    # 2. 修改 SSH 配置文件
     echo "第二步：正在修改系统 SSH 配置文件..."
     if [ ! -f "/etc/ssh/sshd_config" ]; then
         echo "错误：未找到 /etc/ssh/sshd_config 配置文件，修改终止！"
         return
     fi
 
-    # 备份原配置
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-    
-    # 移除原本可能存在的 Port 行，并写入新 Port
     sed -i '/^Port /d' /etc/ssh/sshd_config
     sed -i '/^#Port 22/d' /etc/ssh/sshd_config
     echo "Port $new_port" >> /etc/ssh/sshd_config
@@ -251,13 +270,11 @@ change_ssh_port() {
     # 4. 自动在防火墙中关闭旧的 22 端口
     echo "第四步：正在防火墙中自动剔除/封锁旧的 22 端口..."
     if [ "$FIREWALL_MODE" = "nftables" ]; then
-        # 寻找包含 22 accept 的规则并删除
         local handles=$(nft -a list chain inet filter input | grep "tcp dport 22" | awk -F'handle ' '{print $2}')
         for h in $handles; do
             nft delete rule inet filter input handle $h 2>/dev/null
         done
     else
-        # 循环删除 iptables 中的 22 端口规则
         while iptables -L INPUT -n --line-numbers | grep -q "dpt:22"; do
             local num=$(iptables -L INPUT -n --line-numbers | grep "dpt:22" | head -n 1 | awk '{print $1}')
             iptables -D INPUT $num 2>/dev/null
@@ -292,33 +309,10 @@ save_rules() {
     fi
 }
 
-# 自动注册 fw 快捷键功能
-register_shortcut() {
-    # 1. 将当前运行的脚本复制到系统全局命令目录，并命名为 fw（这样即使不 source，部分系统也能直接敲 fw 运行）
-    if [ "$SCRIPT_PATH" != "/usr/local/bin/fw" ]; then
-        cp "$SCRIPT_PATH" /usr/local/bin/fw 2>/dev/null
-        chmod +x /usr/local/bin/fw 2>/dev/null
-    fi
-
-    # 2. 写入别名到配置文件，保证持久化（重启、新开终端也有效）
-    local alias_cmd="alias fw='/usr/local/bin/fw'"
-    
-    for rc_file in "/etc/bash.bashrc" "/etc/bashrc" "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$rc_file" ]; then
-            if ! grep -q "alias fw=" "$rc_file"; then
-                echo "" >> "$rc_file"
-                echo "# 智能防火墙快捷键" >> "$rc_file"
-                echo "$alias_cmd" >> "$rc_file"
-            fi
-        fi
-    done
-
-    # 3. 【核心自动化】通过修改当前父进程的别名哈希表，实现当前窗口免刷新、立即生效！
-    # 如果用户当前敲的不是 fw，我们在当前会话临时生成一个别名函数，让它在后台悄悄生效
-    if [ "$(basename "$0")" != "fw" ]; then
-        alias fw='/usr/local/bin/fw' 2>/dev/null
-    fi
-}
+# ==================== 核心主程序流 ====================
+# 先初始化探测环境与注册快捷键
+detect_firewall
+register_shortcut
 
 # 首次运行提示
 if [ "$FIREWALL_MODE" = "nftables" ] && ! nft list tables | grep -q "inet filter"; then
@@ -332,7 +326,7 @@ while true; do
     echo "2. 查看当前放行规则"
     echo "3. 手动放行端口/端口范围 (支持 TCP/UDP/ALL)"
     echo "4. 封锁/删除指定规则"
-    echo "5. 一键一键安全修改 SSH 端口 (修改后自动关闭22端口)"
+    echo "5. 一键安全修改 SSH 端口 (修改后自动关闭22端口)"
     echo "6. 一键放通所有端口 (切换为全开模式)"
     echo "7. 手动保存当前规则"
     echo "8. 退出脚本"
@@ -347,7 +341,12 @@ while true; do
         5) change_ssh_port ;;
         6) allow_all_ports ;;
         7) save_rules ;;
-        8) echo "感谢使用，脚本已安全退出。"; exit 0 ;;
+        8) 
+            echo "感谢使用，脚本已安全退出。"
+            # 【核心自动化技巧】退出时强制清除系统命令哈希表，让新写入的 fw 立即免刷新直接生效！
+            hash -r 2>/dev/null
+            exit 0 
+            ;;
         *) echo "无效选项，请重新选择！" ;;
     esac
 done
