@@ -49,7 +49,7 @@ auto_allow_current_ports() {
         return
     fi
 
-    local ports=$(ss -tuln | awk 'NR>1 {print $5}' | sed 's/.*://' | sed 's/[^0-9]//g' | sort -nu)
+    local ports=$(ss -tuln | awk 'NR>1 {print $5}' | tr ' ' '\n' | grep -oE '[0-9]+$' | sort -nu)
     
     if [ -z "$ports" ]; then
         echo "未探测到活动的监听端口。"
