@@ -38,7 +38,7 @@
 ## 🛠️ 一键远程运行命令
 
 ```
-curl -sSO https://raw.githubusercontent.com/pansir0290/firewall/main/fw.sh && bash fwpro.sh
+curl -sSO https://raw.githubusercontent.com/pansir0290/firewall/main/fwpro.sh && bash fwpro.sh
 ```
 
 ## 📖 交互菜单说明
